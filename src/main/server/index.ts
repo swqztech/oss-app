@@ -339,7 +339,12 @@ app.post('/api/connect', async (req, res) => {
 
     if (!result) throw lastErr
 
-    const buckets = (result.buckets || []).map((b) => {
+    // ali-oss 类型在不同版本可能是 Bucket[] 或 { buckets?: Bucket[] }
+    const rawList = Array.isArray(result)
+      ? result
+      : ((result as { buckets?: OSS.Bucket[] }).buckets ?? [])
+
+    const buckets = rawList.map((b) => {
       const raw = b as OSS.Bucket & { location?: string; Location?: string }
       const region = normalizeRegion(
         unwrapLocation(raw.region || raw.location || raw.Location) || creds.region,
@@ -348,7 +353,10 @@ app.post('/api/connect', async (req, res) => {
         name: b.name,
         region,
         creationDate: b.creationDate || null,
-        storageClass: b.storageClass || null,
+        storageClass:
+          (b as OSS.Bucket & { storageClass?: string }).storageClass ||
+          (b as { StorageClass?: string }).StorageClass ||
+          null,
       }
     })
     buckets.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
