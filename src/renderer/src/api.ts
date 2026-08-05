@@ -49,6 +49,27 @@ export async function connect(creds: CredsPayload) {
   return post<{ ok: true; buckets: BucketInfo[] }>('/api/connect', creds)
 }
 
+export type BucketStatInfo = {
+  ok: true
+  bucket: string
+  region: string
+  storage: number
+  objectCount: number
+  multipartUploadCount: number
+  liveChannelCount: number
+  standardStorage: number
+  infrequentAccessStorage: number
+  archiveStorage: number
+  coldArchiveStorage: number
+}
+
+export async function getBucketStat(
+  creds: CredsPayload,
+  opts: { bucket: string; bucketRegion?: string },
+) {
+  return post<BucketStatInfo>('/api/bucket-stat', { ...creds, ...opts })
+}
+
 export type SearchHit = FileItem & {
   /** 相对搜索起点的路径 */
   path: string

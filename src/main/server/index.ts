@@ -366,6 +366,49 @@ app.post('/api/connect', async (req, res) => {
   }
 })
 
+/** 查询单个 Bucket 用量（GetBucketStat，数据可能有约 1 小时延迟） */
+app.post('/api/bucket-stat', async (req, res) => {
+  try {
+    const creds = readCreds(req.body || {})
+    const bucket = String(req.body?.bucket || '').trim()
+    const bucketRegion = String(req.body?.bucketRegion || '').trim() || undefined
+    if (!bucket) throw new Error('请指定 Bucket')
+
+    const data = await withBucketClient(creds, bucket, bucketRegion, async (client, meta) => {
+      const oss = client as OSS & {
+        getBucketStat: (name?: string) => Promise<{
+          stat?: Record<string, string | number>
+        }>
+      }
+      if (typeof oss.getBucketStat !== 'function') {
+        throw new Error('当前 SDK 不支持 getBucketStat')
+      }
+      const result = await oss.getBucketStat(bucket)
+      const stat = result?.stat || {}
+      const num = (key: string) => {
+        const v = stat[key] ?? stat[key.replace(/^[A-Z]/, (c) => c.toLowerCase())]
+        const n = Number(v)
+        return Number.isFinite(n) ? n : 0
+      }
+      return {
+        region: meta.region,
+        storage: num('Storage'),
+        objectCount: num('ObjectCount'),
+        multipartUploadCount: num('MultipartUploadCount'),
+        liveChannelCount: num('LiveChannelCount'),
+        standardStorage: num('StandardStorage'),
+        infrequentAccessStorage: num('InfrequentAccessStorage'),
+        archiveStorage: num('ArchiveStorage'),
+        coldArchiveStorage: num('ColdArchiveStorage'),
+      }
+    })
+
+    res.json({ ok: true, bucket, ...data })
+  } catch (err) {
+    res.status(400).json({ ok: false, error: errMessage(err) })
+  }
+})
+
 /** 列出指定前缀下的目录与文件（目录完整收集并排前） */
 app.post('/api/objects', async (req, res) => {
   try {

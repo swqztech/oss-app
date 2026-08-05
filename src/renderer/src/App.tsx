@@ -15,6 +15,7 @@ import {
   connect,
   deleteObject,
   deleteObjectsBatch,
+  getBucketStat,
   listObjects,
   searchObjects,
   signUrl,
@@ -164,6 +165,14 @@ export default function App() {
   const [connecting, setConnecting] = useState(false)
   const [connected, setConnected] = useState(false)
   const [buckets, setBuckets] = useState<BucketInfo[]>([])
+  const [bucketStats, setBucketStats] = useState<
+    Record<
+      string,
+      | { status: 'loading' }
+      | { status: 'ok'; storage: number; objectCount: number }
+      | { status: 'error'; message: string }
+    >
+  >({})
   const [bucket, setBucket] = useState<string | null>(null)
   const [bucketRegion, setBucketRegion] = useState<string | null>(null)
   const [prefix, setPrefix] = useState('')
@@ -566,6 +575,53 @@ export default function App() {
     }
   }
 
+  const loadBucketStats = useCallback(async (acct: OssAccount, list: BucketInfo[]) => {
+    if (list.length === 0) {
+      setBucketStats({})
+      return
+    }
+    setBucketStats(
+      Object.fromEntries(list.map((b) => [b.name, { status: 'loading' as const }])),
+    )
+
+    const creds = toCreds(acct)
+    const concurrency = 4
+    let index = 0
+
+    async function worker() {
+      while (index < list.length) {
+        const current = list[index++]
+        if (!current) break
+        try {
+          const stat = await getBucketStat(creds, {
+            bucket: current.name,
+            bucketRegion: current.region,
+          })
+          setBucketStats((prev) => ({
+            ...prev,
+            [current.name]: {
+              status: 'ok',
+              storage: stat.storage,
+              objectCount: stat.objectCount,
+            },
+          }))
+        } catch (err) {
+          setBucketStats((prev) => ({
+            ...prev,
+            [current.name]: {
+              status: 'error',
+              message: err instanceof Error ? err.message : String(err),
+            },
+          }))
+        }
+      }
+    }
+
+    await Promise.all(
+      Array.from({ length: Math.min(concurrency, list.length) }, () => worker()),
+    )
+  }, [])
+
   const doConnect = useCallback(
     async (
       acct: OssAccount,
@@ -583,6 +639,7 @@ export default function App() {
       setConnecting(true)
       setConnected(false)
       setBuckets([])
+      setBucketStats({})
       if (!opts?.keepPath) {
         setBucket(null)
         setBucketRegion(null)
@@ -612,13 +669,16 @@ export default function App() {
           const label = acct.name || maskKey(acct.accessKeyId)
           toast.success(`已连接 ${label}，共 ${res.buckets.length} 个 Bucket`)
         }
+
+        // 异步拉容量，不阻塞进入浏览
+        void loadBucketStats(acct, res.buckets)
       } catch (err) {
         toast.error(err)
       } finally {
         setConnecting(false)
       }
     },
-    [loadObjects],
+    [loadObjects, loadBucketStats],
   )
 
   // 首次启动：从 URL hash 恢复目录位置
@@ -797,6 +857,7 @@ export default function App() {
       setActiveId(list[0]?.id ?? null)
       setConnected(false)
       setBuckets([])
+      setBucketStats({})
       backToBuckets()
       writeBrowseHash(list[0] ? { accountId: list[0].id } : null)
       if (list[0]) void doConnect(list[0])
@@ -1100,6 +1161,7 @@ export default function App() {
                 <h2>Buckets</h2>
                 <p>
                   {active?.name} · {buckets.length} 个
+                  <span className="stat-note"> · 容量约有 1 小时延迟</span>
                 </p>
               </div>
               <button
@@ -1112,18 +1174,28 @@ export default function App() {
               </button>
             </header>
             <div className="bucket-grid">
-              {buckets.map((b) => (
-                <button
-                  key={b.name}
-                  className="bucket-card"
-                  type="button"
-                  onClick={() => openBucket(b)}
-                >
-                  <strong>{b.name}</strong>
-                  <span>{b.region}</span>
-                  <span>{formatTime(b.creationDate)}</span>
-                </button>
-              ))}
+              {buckets.map((b) => {
+                const stat = bucketStats[b.name]
+                return (
+                  <button
+                    key={b.name}
+                    className="bucket-card"
+                    type="button"
+                    onClick={() => openBucket(b)}
+                  >
+                    <strong>{b.name}</strong>
+                    <span>{b.region}</span>
+                    <span className="bucket-stat">
+                      {!stat || stat.status === 'loading'
+                        ? '容量加载中…'
+                        : stat.status === 'error'
+                          ? '容量不可用'
+                          : `${formatSize(stat.storage)} · ${stat.objectCount.toLocaleString('zh-CN')} 对象`}
+                    </span>
+                    <span>{formatTime(b.creationDate)}</span>
+                  </button>
+                )
+              })}
               {buckets.length === 0 && (
                 <p className="empty-hint light">该账号下没有 Bucket</p>
               )}

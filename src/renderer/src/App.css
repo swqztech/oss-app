@@ -903,6 +903,18 @@ button.gallery-card:hover,
   font-family: var(--font-mono);
 }
 
+.bucket-card .bucket-stat {
+  color: #1d4ed8;
+  font-weight: 600;
+  font-family: var(--font-body, inherit);
+}
+
+.stat-note {
+  color: var(--ink-muted);
+  font-weight: 400;
+  font-size: 0.85em;
+}
+
 .breadcrumbs {
   display: flex;
   flex-wrap: wrap;
