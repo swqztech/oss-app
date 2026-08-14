@@ -1,4 +1,4 @@
-import { app, shell, BrowserWindow } from 'electron'
+import { app, shell, BrowserWindow, ipcMain, dialog } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -42,6 +42,32 @@ app.whenReady().then(async () => {
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
+
+  ipcMain.handle(
+    'download:url',
+    async (event, url: string, filename: string) => {
+      const win = BrowserWindow.fromWebContents(event.sender)
+      if (!win) return { ok: false }
+      const { filePath, canceled } = await dialog.showSaveDialog(win, {
+        defaultPath: filename || 'download',
+        title: '保存文件',
+      })
+      if (canceled || !filePath) return { ok: false }
+      const ses = win.webContents.session
+      const once = (fn: (item: Electron.DownloadItem) => void) => {
+        const handler = (_e: Electron.Event, item: Electron.DownloadItem) => {
+          ses.off('will-download', handler)
+          fn(item)
+        }
+        ses.on('will-download', handler)
+      }
+      once((item) => {
+        item.setSavePath(filePath)
+      })
+      win.webContents.downloadURL(String(url || ''))
+      return { ok: true }
+    },
+  )
 
   if (!is.dev) {
     attachRendererStatic(join(__dirname, '../renderer'))

@@ -1032,10 +1032,24 @@ button.gallery-card:hover,
   content: 'F';
 }
 
-.muted {
-  color: var(--ink-muted);
+.folder-stat-btn {
+  font-family: var(--font-body, inherit);
+}
+
+.folder-stat-value {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
   font-family: var(--font-mono);
   font-size: 0.78rem;
+}
+
+.folder-stat-value:hover {
+  color: var(--accent);
+  text-decoration: underline;
 }
 
 .row-actions {

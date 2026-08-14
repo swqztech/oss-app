@@ -70,6 +70,24 @@ export async function getBucketStat(
   return post<BucketStatInfo>('/api/bucket-stat', { ...creds, ...opts })
 }
 
+export type FolderStatInfo = {
+  ok: true
+  bucket: string
+  prefix: string
+  size: number
+  objectCount: number
+  lastModified: string | null
+  truncated: boolean
+  pages: number
+}
+
+export async function getFolderStat(
+  creds: CredsPayload,
+  opts: { bucket: string; bucketRegion?: string; prefix: string },
+) {
+  return post<FolderStatInfo>('/api/folder-stat', { ...creds, ...opts })
+}
+
 export type SearchHit = FileItem & {
   /** 相对搜索起点的路径 */
   path: string
@@ -134,6 +152,8 @@ export async function signUrl(
     expires?: number
     /** OSS 图片处理，如 image/resize,w_480/format,jpg */
     process?: string
+    download?: boolean
+    filename?: string
   },
 ) {
   return post<{ ok: true; url: string }>('/api/sign', { ...creds, ...opts })

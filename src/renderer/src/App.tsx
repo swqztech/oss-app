@@ -16,6 +16,7 @@ import {
   deleteObject,
   deleteObjectsBatch,
   getBucketStat,
+  getFolderStat,
   listObjects,
   searchObjects,
   signUrl,
@@ -107,7 +108,17 @@ function formatSize(bytes: number) {
     n /= 1024
     i++
   }
-  return `${n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)} ${units[i]}`
+  if (i === 0) return `${bytes} B`
+  return `${n.toFixed(2)} ${units[i]}`
+}
+
+function formatBucketStorage(bytes: number) {
+  const mb = bytes / (1024 * 1024)
+  const mbText = mb.toLocaleString('zh-CN', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
+  return `${formatSize(bytes)} · ${mbText} MB`
 }
 
 function formatTime(iso: string | null) {
@@ -209,6 +220,25 @@ export default function App() {
     () => new Map(),
   )
   const [batchDeleting, setBatchDeleting] = useState(false)
+  const [folderStats, setFolderStats] = useState<
+    Record<
+      string,
+      | { status: 'loading' }
+      | {
+          status: 'ok'
+          size: number
+          objectCount: number
+          lastModified: string | null
+          truncated: boolean
+        }
+      | { status: 'error'; message: string }
+    >
+  >({})
+  const folderStatSlots = useRef(0)
+  const folderStatWaiters = useRef<Array<() => void>>([])
+  const folderStatInflight = useRef(new Set<string>())
+  const folderStatsRef = useRef(folderStats)
+  folderStatsRef.current = folderStats
 
   const searchMode = Boolean(searchQuery)
 
@@ -239,6 +269,65 @@ export default function App() {
   const active = useMemo(
     () => accounts.find((a) => a.id === activeId) ?? null,
     [accounts, activeId],
+  )
+
+  const withFolderStatSlot = async <T,>(fn: () => Promise<T>): Promise<T> => {
+    while (folderStatSlots.current >= 2) {
+      await new Promise<void>((resolve) => {
+        folderStatWaiters.current.push(resolve)
+      })
+    }
+    folderStatSlots.current += 1
+    try {
+      return await fn()
+    } finally {
+      folderStatSlots.current -= 1
+      folderStatWaiters.current.shift()?.()
+    }
+  }
+
+  const loadFolderStat = useCallback(
+    async (folderKey: string, opts?: { force?: boolean }) => {
+      if (!active || !bucket) return
+      const cacheKey = `${bucket}::${folderKey}`
+      if (!opts?.force) {
+        const cur = folderStatsRef.current[cacheKey]
+        if (cur?.status === 'ok' || cur?.status === 'loading') return
+      }
+      if (folderStatInflight.current.has(cacheKey)) return
+      folderStatInflight.current.add(cacheKey)
+      setFolderStats((prev) => ({ ...prev, [cacheKey]: { status: 'loading' } }))
+      try {
+        const res = await withFolderStatSlot(() =>
+          getFolderStat(toCreds(active), {
+            bucket,
+            bucketRegion: bucketRegion || undefined,
+            prefix: folderKey,
+          }),
+        )
+        setFolderStats((prev) => ({
+          ...prev,
+          [cacheKey]: {
+            status: 'ok',
+            size: res.size,
+            objectCount: res.objectCount,
+            lastModified: res.lastModified,
+            truncated: res.truncated,
+          },
+        }))
+      } catch (err) {
+        setFolderStats((prev) => ({
+          ...prev,
+          [cacheKey]: {
+            status: 'error',
+            message: err instanceof Error ? err.message : String(err),
+          },
+        }))
+      } finally {
+        folderStatInflight.current.delete(cacheKey)
+      }
+    },
+    [active, bucket, bucketRegion],
   )
 
   const crumbs = useMemo(() => {
@@ -881,6 +970,24 @@ export default function App() {
     }
   }
 
+  const saveDownload = async (item: ObjectItem) => {
+    if (item.type !== 'file' || !active || !bucket) return
+    try {
+      const res = await signUrl(toCreds(active), {
+        bucket,
+        bucketRegion: bucketRegion || undefined,
+        key: item.key,
+        expires: 3600,
+        download: true,
+        filename: item.name,
+      })
+      const saved = await window.api.saveDownload(res.url, item.name)
+      if (saved?.ok) toast.success('已开始下载')
+    } catch (err) {
+      toast.error(err)
+    }
+  }
+
   const openDownload = async (item: ObjectItem) => {
     if (item.type !== 'file' || !active || !bucket) return
     try {
@@ -961,6 +1068,51 @@ export default function App() {
 
   const folders = items.filter((i) => i.type === 'folder')
   const files = items.filter((i) => i.type === 'file')
+
+  const folderStatOf = (folderKey: string) =>
+    folderStats[`${bucket}::${folderKey}`]
+
+  const renderFolderSize = (folderKey: string) => {
+    const stat = folderStatOf(folderKey)
+    if (!stat || stat.status === 'error') {
+      return (
+        <button
+          className="btn-tiny folder-stat-btn"
+          type="button"
+          title={stat?.status === 'error' ? stat.message : '扫描该目录下全部对象以统计大小'}
+          onClick={(e) => {
+            e.stopPropagation()
+            void loadFolderStat(folderKey, { force: true })
+          }}
+        >
+          {stat?.status === 'error' ? '重试' : '统计'}
+        </button>
+      )
+    }
+    if (stat.status === 'loading') {
+      return <span className="muted">统计中…</span>
+    }
+    return (
+      <button
+        className="folder-stat-value"
+        type="button"
+        title={`${stat.truncated ? '扫描未完成，约为 · ' : ''}${stat.objectCount.toLocaleString('zh-CN')} 个对象 · 点击重新统计`}
+        onClick={(e) => {
+          e.stopPropagation()
+          void loadFolderStat(folderKey, { force: true })
+        }}
+      >
+        {stat.truncated ? '~ ' : ''}
+        {formatSize(stat.size)}
+      </button>
+    )
+  }
+
+  const renderFolderTime = (folderKey: string) => {
+    const stat = folderStatOf(folderKey)
+    if (stat?.status === 'ok') return formatTime(stat.lastModified)
+    return '—'
+  }
 
   const selectableItems = useMemo(() => {
     if (searchMode) {
@@ -1190,7 +1342,7 @@ export default function App() {
                         ? '容量加载中…'
                         : stat.status === 'error'
                           ? '容量不可用'
-                          : `${formatSize(stat.storage)} · ${stat.objectCount.toLocaleString('zh-CN')} 对象`}
+                          : `${formatBucketStorage(stat.storage)} · ${stat.objectCount.toLocaleString('zh-CN')} 对象`}
                     </span>
                     <span>{formatTime(b.creationDate)}</span>
                   </button>
@@ -1274,6 +1426,21 @@ export default function App() {
                   >
                     刷新
                   </button>
+                  {!searchMode && folders.length > 0 && (
+                    <button
+                      className="btn-light"
+                      type="button"
+                      disabled={!active}
+                      title="重新扫描当前页各目录大小（大目录可能较慢）"
+                      onClick={() => {
+                        for (const item of folders) {
+                          void loadFolderStat(item.key, { force: true })
+                        }
+                      }}
+                    >
+                      统计目录
+                    </button>
+                  )}
                 </div>
               </div>
               <div className="search-bar">
@@ -1403,6 +1570,13 @@ export default function App() {
                           <button
                             className="btn-tiny"
                             type="button"
+                            onClick={() => void saveDownload(hit)}
+                          >
+                            下载
+                          </button>
+                          <button
+                            className="btn-tiny"
+                            type="button"
                             onClick={() => void copyDownload(hit)}
                           >
                             复制
@@ -1465,7 +1639,14 @@ export default function App() {
                           </div>
                           <div className="gallery-meta">
                             <strong title={item.name}>{item.name}/</strong>
-                            <span>目录</span>
+                            <span>{(() => {
+                              const stat = folderStatOf(item.key)
+                              if (stat?.status === 'loading') return '统计中…'
+                              if (stat?.status === 'ok') {
+                                return `${stat.truncated ? '~ ' : ''}${formatSize(stat.size)} · ${stat.objectCount.toLocaleString('zh-CN')} 个对象`
+                              }
+                              return '目录'
+                            })()}</span>
                           </div>
                         </button>
                         <div className="gallery-actions">
@@ -1526,6 +1707,13 @@ export default function App() {
                             onClick={() => void openDownload(item)}
                           >
                             打开
+                          </button>
+                          <button
+                            className="btn-tiny"
+                            type="button"
+                            onClick={() => void saveDownload(item)}
+                          >
+                            下载
                           </button>
                           <button
                             className="btn-tiny"
@@ -1630,6 +1818,13 @@ export default function App() {
                             <button
                               className="btn-tiny"
                               type="button"
+                              onClick={() => void saveDownload(hit)}
+                            >
+                              下载
+                            </button>
+                            <button
+                              className="btn-tiny"
+                              type="button"
                               onClick={() => void copyDownload(hit)}
                             >
                               复制链接
@@ -1702,8 +1897,8 @@ export default function App() {
                               {item.name}/
                             </button>
                           </td>
-                          <td className="muted">—</td>
-                          <td className="muted">—</td>
+                          <td>{renderFolderSize(item.key)}</td>
+                          <td className="muted">{renderFolderTime(item.key)}</td>
                           <td className="row-actions">
                             <button
                               className="btn-tiny danger"
@@ -1758,6 +1953,13 @@ export default function App() {
                               onClick={() => void openDownload(item)}
                             >
                               打开
+                            </button>
+                            <button
+                              className="btn-tiny"
+                              type="button"
+                              onClick={() => void saveDownload(item)}
+                            >
+                              下载
                             </button>
                             <button
                               className="btn-tiny"

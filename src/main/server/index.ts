@@ -312,8 +312,64 @@ async function listDirFoldersFirst(
   }
 }
 
+/** 按前缀递归汇总对象大小（OSS 无原生目录大小） */
+async function sumPrefixStats(client: OSS, prefix: string) {
+  const dirPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`
+  let marker: string | undefined
+  let pages = 0
+  const maxPages = 100
+  const deadline = Date.now() + 45_000
+  let size = 0
+  let objectCount = 0
+  let lastModified: string | null = null
+  let ossTruncated = false
+
+  do {
+    const listed = await client.list(
+      {
+        prefix: dirPrefix,
+        marker,
+        'max-keys': 1000,
+      },
+      { timeout: 60_000 },
+    )
+
+    for (const o of listed.objects || []) {
+      if (!o.name || o.name === dirPrefix) continue
+      const key = String(o.name)
+      if (key.endsWith('/')) continue
+      objectCount++
+      size += Number(o.size) || 0
+      if (o.lastModified) {
+        if (!lastModified || o.lastModified > lastModified) {
+          lastModified = o.lastModified
+        }
+      }
+    }
+
+    ossTruncated = Boolean(listed.isTruncated)
+    marker = listed.nextMarker || undefined
+    pages++
+    if (!ossTruncated || !marker) break
+    if (Date.now() > deadline) break
+  } while (pages < maxPages)
+
+  const hitPageLimit = pages >= maxPages && ossTruncated
+  const hitTimeLimit = Date.now() > deadline && ossTruncated
+  const truncated = Boolean((ossTruncated && marker) || hitPageLimit || hitTimeLimit)
+
+  return {
+    prefix: dirPrefix,
+    size,
+    objectCount,
+    lastModified,
+    truncated,
+    pages,
+  }
+}
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, version: 6 })
+  res.json({ ok: true, version: 7 })
 })
 
 /** 校验凭证并列出所有 Bucket */
@@ -448,6 +504,38 @@ app.post('/api/objects', async (req, res) => {
         fileCount: listed.fileCount,
         pages: listed.pages,
       },
+    })
+  } catch (err) {
+    res.status(400).json({ ok: false, error: errMessage(err) })
+  }
+})
+
+/** 统计某个「目录」前缀下全部对象的大小与数量 */
+app.post('/api/folder-stat', async (req, res) => {
+  try {
+    const creds = readCreds(req.body || {})
+    const bucket = String(req.body?.bucket || '').trim()
+    const bucketRegion = String(req.body?.bucketRegion || '').trim() || undefined
+    let prefix = String(req.body?.prefix || req.body?.key || '').trim()
+    if (!bucket) throw new Error('请指定 Bucket')
+    if (!prefix) throw new Error('请指定目录')
+    if (prefix === '/' || prefix.includes('..')) throw new Error('非法的对象路径')
+    if (!prefix.endsWith('/')) prefix = `${prefix}/`
+
+    const data = await withBucketClient(
+      creds,
+      bucket,
+      bucketRegion,
+      async (client, meta) => {
+        const stats = await sumPrefixStats(client, prefix)
+        return { ...stats, ...meta }
+      },
+    )
+
+    res.json({
+      ok: true,
+      bucket,
+      ...data,
     })
   } catch (err) {
     res.status(400).json({ ok: false, error: errMessage(err) })
@@ -735,6 +823,8 @@ app.post('/api/sign', async (req, res) => {
     const expires = Math.min(Number(req.body?.expires) || 3600, 86400)
     // 例：image/resize,w_480/format,jpg —— 用于 TIFF 等浏览器无法直出的格式
     const process = String(req.body?.process || '').trim() || undefined
+    const asDownload = Boolean(req.body?.download)
+    const filename = String(req.body?.filename || '').trim() || key.split('/').pop() || 'download'
 
     if (!bucket) throw new Error('请指定 Bucket')
     if (!key) throw new Error('请指定对象 key')
@@ -742,24 +832,29 @@ app.post('/api/sign', async (req, res) => {
       throw new Error('非法的图片处理参数')
     }
 
+    const asciiName = filename.replace(/[^\x20-\x7E]/g, '_') || 'download'
+    const disposition = `attachment; filename="${asciiName.replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+
     const url = await withBucketClient(
       creds,
       bucket,
       bucketRegion,
       async (client, meta) => {
         if (meta.authorizationV4) {
+          const queries: Record<string, string> = {}
+          if (process) queries['x-oss-process'] = process
+          if (asDownload) queries['response-content-disposition'] = disposition
           return await client.signatureUrlV4(
             'GET',
             expires,
-            process
-              ? { queries: { 'x-oss-process': process } }
-              : undefined,
+            Object.keys(queries).length ? { queries } : undefined,
             key,
           )
         }
         return client.signatureUrl(key, {
           expires,
           ...(process ? { process } : {}),
+          ...(asDownload ? { response: { 'content-disposition': disposition } } : {}),
         })
       },
     )
