@@ -32,6 +32,7 @@ import {
   type PreviewItem,
 } from './Thumb'
 import { toast } from './toast'
+import { DownloadPanel, useDownloadBadge } from './DownloadPanel'
 import './App.css'
 
 const VIEW_KEY = 'oss-desk:view-mode'
@@ -215,6 +216,8 @@ export default function App() {
   const [searchJumpInput, setSearchJumpInput] = useState('')
   const [viewMode, setViewMode] = useState<ViewMode>(() => readViewMode())
   const [galleryIndex, setGalleryIndex] = useState<number | null>(null)
+  const [showDownloads, setShowDownloads] = useState(false)
+  const downloadBadge = useDownloadBadge()
   /** 多选：key -> file|folder */
   const [selected, setSelected] = useState<Map<string, 'file' | 'folder'>>(
     () => new Map(),
@@ -982,7 +985,11 @@ export default function App() {
         filename: item.name,
       })
       const saved = await window.api.saveDownload(res.url, item.name)
-      if (saved?.ok) toast.success('已开始下载')
+      if (saved?.canceled) return
+      if (saved?.ok) {
+        setShowDownloads(true)
+        toast.success('已开始下载，可在下载记录里查看进度')
+      }
     } catch (err) {
       toast.error(err)
     }
@@ -1290,6 +1297,18 @@ export default function App() {
                 ? `已连接 · ${buckets.length} 桶`
                 : '未连接'}
           </span>
+          <button
+            className="btn-ghost download-entry"
+            type="button"
+            onClick={() => setShowDownloads(true)}
+          >
+            下载记录
+            {downloadBadge.activeCount > 0
+              ? downloadBadge.percent === -1
+                ? ` · 进行中`
+                : ` · ${downloadBadge.percent}%`
+              : ''}
+          </button>
         </div>
       </aside>
 
@@ -2120,6 +2139,8 @@ export default function App() {
           </section>
         )}
       </main>
+
+      <DownloadPanel open={showDownloads} onClose={() => setShowDownloads(false)} />
 
       {showForm && (
         <div
